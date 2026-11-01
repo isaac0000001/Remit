@@ -1,15 +1,26 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.config import settings
+from app.database import close_database
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_database()
 
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Global remittance platform API",
+    description="Global Remittance Platform API",
     version=settings.API_VERSION,
     docs_url="/docs" if settings.APP_ENV != "production" else None,
     redoc_url="/redoc" if settings.APP_ENV != "production" else None,
+    lifespan=lifespan,
 )
 
 origins = [
@@ -24,6 +35,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+)
+
+app.include_router(
+    auth_router,
+    prefix=settings.API_PREFIX,
 )
 
 
