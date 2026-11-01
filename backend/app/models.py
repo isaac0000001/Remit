@@ -13,18 +13,19 @@ from sqlalchemy import (
     Index,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import Uuid
 
 
-class Base(DeclarativeBase):
-    pass
-
-
 def utc_now():
     return datetime.now(timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
 
 
 class CustomerStatus(str, enum.Enum):
@@ -59,29 +60,55 @@ class EntryDirection(str, enum.Enum):
     CREDIT = "credit"
 
 
+class AccountType(str, enum.Enum):
+    CUSTOMER_WALLET = "customer_wallet"
+    PAYMENT_CLEARING = "payment_clearing"
+    PAYOUT_CLEARING = "payout_clearing"
+    FEE_REVENUE = "fee_revenue"
+    SUSPENSE = "suspense"
+
+
 class Customer(Base):
     __tablename__ = "customers"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
 
     email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False,
     )
 
     password_hash: Mapped[str] = mapped_column(
-        String(255), nullable=False
+        String(255),
+        nullable=False,
     )
 
-    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    first_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
+
+    last_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
 
     phone_number: Mapped[str | None] = mapped_column(
-        String(30), unique=True, nullable=True
+        String(30),
+        unique=True,
+        nullable=True,
     )
 
-    country: Mapped[str] = mapped_column(String(2), nullable=False)
+    country: Mapped[str] = mapped_column(
+        String(2),
+        nullable=False,
+    )
 
     status: Mapped[CustomerStatus] = mapped_column(
         Enum(CustomerStatus, native_enum=False),
@@ -90,11 +117,15 @@ class Customer(Base):
     )
 
     email_verified: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean,
+        default=False,
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
 
@@ -114,14 +145,21 @@ class Wallet(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
 
     customer_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("customers.id"), nullable=False, index=True
+        ForeignKey("customers.id"),
+        nullable=False,
+        index=True,
     )
 
-    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+    )
 
     status: Mapped[WalletStatus] = mapped_column(
         Enum(WalletStatus, native_enum=False),
@@ -130,7 +168,70 @@ class Wallet(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
+    )
+
+
+class LedgerAccount(Base):
+    __tablename__ = "ledger_accounts"
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(currency) = 3",
+            name="ck_ledger_account_currency",
+        ),
+        UniqueConstraint(
+            "wallet_id",
+            name="uq_ledger_account_wallet",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+    account_code: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    account_type: Mapped[AccountType] = mapped_column(
+        Enum(AccountType, native_enum=False),
+        nullable=False,
+    )
+
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customers.id"),
+        nullable=True,
+        index=True,
+    )
+
+    wallet_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("wallets.id"),
+        nullable=True,
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
 
@@ -158,47 +259,61 @@ class RemittanceTransfer(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
 
     customer_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("customers.id"), nullable=False, index=True
+        ForeignKey("customers.id"),
+        nullable=False,
+        index=True,
     )
 
     source_currency: Mapped[str] = mapped_column(
-        String(3), nullable=False
+        String(3),
+        nullable=False,
     )
 
     destination_currency: Mapped[str] = mapped_column(
-        String(3), nullable=False
+        String(3),
+        nullable=False,
     )
 
     source_amount: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), nullable=False
+        Numeric(20, 8),
+        nullable=False,
     )
 
     destination_amount: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), nullable=False
+        Numeric(20, 8),
+        nullable=False,
     )
 
     fee_amount: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), default=Decimal("0"), nullable=False
+        Numeric(20, 8),
+        default=Decimal("0"),
+        nullable=False,
     )
 
     exchange_rate: Mapped[Decimal] = mapped_column(
-        Numeric(24, 12), nullable=False
+        Numeric(24, 12),
+        nullable=False,
     )
 
     beneficiary_name: Mapped[str] = mapped_column(
-        String(200), nullable=False
+        String(200),
+        nullable=False,
     )
 
     beneficiary_account: Mapped[str] = mapped_column(
-        String(100), nullable=False
+        String(100),
+        nullable=False,
     )
 
     beneficiary_country: Mapped[str] = mapped_column(
-        String(2), nullable=False
+        String(2),
+        nullable=False,
     )
 
     status: Mapped[TransferStatus] = mapped_column(
@@ -208,11 +323,14 @@ class RemittanceTransfer(Base):
     )
 
     idempotency_key: Mapped[str] = mapped_column(
-        String(100), nullable=False
+        String(100),
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
 
@@ -220,15 +338,21 @@ class LedgerTransaction(Base):
     __tablename__ = "ledger_transactions"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
 
     transfer_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("transfers.id"), nullable=True, index=True
+        ForeignKey("transfers.id"),
+        nullable=True,
+        index=True,
     )
 
     reference: Mapped[str] = mapped_column(
-        String(100), unique=True, nullable=False
+        String(100),
+        unique=True,
+        nullable=False,
     )
 
     status: Mapped[LedgerStatus] = mapped_column(
@@ -238,7 +362,9 @@ class LedgerTransaction(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
 
@@ -251,22 +377,28 @@ class LedgerEntry(Base):
             name="ck_ledger_entry_amount_positive",
         ),
         Index(
-            "ix_ledger_entries_wallet_created",
-            "wallet_id",
+            "ix_ledger_entries_account_created",
+            "ledger_account_id",
             "created_at",
         ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
     )
 
     ledger_transaction_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("ledger_transactions.id"), nullable=False, index=True
+        ForeignKey("ledger_transactions.id"),
+        nullable=False,
+        index=True,
     )
 
-    wallet_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("wallets.id"), nullable=False, index=True
+    ledger_account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ledger_accounts.id"),
+        nullable=False,
+        index=True,
     )
 
     direction: Mapped[EntryDirection] = mapped_column(
@@ -275,13 +407,17 @@ class LedgerEntry(Base):
     )
 
     amount: Mapped[Decimal] = mapped_column(
-        Numeric(20, 8), nullable=False
+        Numeric(20, 8),
+        nullable=False,
     )
 
     currency: Mapped[str] = mapped_column(
-        String(3), nullable=False
+        String(3),
+        nullable=False,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
