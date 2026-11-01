@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.compliance import router as compliance_router
 from app.config import settings
 from app.database import close_database
 
@@ -23,22 +24,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-origins = [
-    origin.strip()
-    for origin in settings.CORS_ORIGINS.split(",")
-    if origin.strip()
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Request-ID",
+    ],
 )
 
 app.include_router(
     auth_router,
+    prefix=settings.API_PREFIX,
+)
+
+app.include_router(
+    compliance_router,
     prefix=settings.API_PREFIX,
 )
 
