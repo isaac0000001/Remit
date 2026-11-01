@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +43,7 @@ async def register_customer(
 
     if existing.scalar_one_or_none():
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Unable to register with these details",
         )
 
@@ -62,12 +63,12 @@ async def register_customer(
     try:
         await db.commit()
         await db.refresh(customer)
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Unable to register with these details",
-        )
+        ) from exc
 
     return customer
 
@@ -90,7 +91,7 @@ async def login_customer(
         customer.password_hash,
     ):
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
@@ -99,7 +100,7 @@ async def login_customer(
         CustomerStatus.CLOSED,
     ):
         raise HTTPException(
-            status_code=403,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is unavailable",
         )
 
@@ -118,12 +119,12 @@ async def get_current_customer(
     try:
         payload = decode_access_token(credentials.credentials)
         customer_id = payload["sub"]
-    except Exception:
+    except (InvalidTokenError, KeyError, TypeError) as exc:
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired access token",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
     result = await db.execute(
         select(Customer).where(Customer.id == customer_id)
@@ -133,7 +134,7 @@ async def get_current_customer(
 
     if not customer:
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Customer account not found",
         )
 
@@ -142,7 +143,7 @@ async def get_current_customer(
         CustomerStatus.CLOSED,
     ):
         raise HTTPException(
-            status_code=403,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is unavailable",
         )
 
