@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -9,36 +10,37 @@ from sqlalchemy.ext.asyncio import (
 from app.config import settings
 
 
-def get_database_url() -> str:
-    if not settings.DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL is not configured. "
-            "Set it in the deployment environment."
-        )
+engine = None
+AsyncSessionLocal = None
 
-    return settings.DATABASE_URL
+if settings.DATABASE_URL:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        echo=False,
+    )
 
-
-engine = create_async_engine(
-    get_database_url(),
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    echo=False,
-)
-
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-    autoflush=False,
-)
+    AsyncSessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    if AsyncSessionLocal is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Database is not configured",
+        )
+
     async with AsyncSessionLocal() as session:
         yield session
 
 
 async def close_database():
-    await engine.dispose()
+    if engine is not None:
+        await engine.dispose()
