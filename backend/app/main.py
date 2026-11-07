@@ -1,9 +1,8 @@
 import logging
-import os
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,9 +21,9 @@ from app.api.ledger import router as ledger_router
 from app.api.payments import router as payments_router
 
 
-# --------------------------------------------------
+# =========================================================
 # CONFIGURATION
-# --------------------------------------------------
+# =========================================================
 
 settings = get_settings()
 
@@ -32,11 +31,7 @@ APP_NAME = settings.APP_NAME
 APP_VERSION = settings.API_VERSION
 API_PREFIX = settings.API_PREFIX.rstrip("/")
 
-APP_ENV = os.getenv(
-    "APP_ENV",
-    getattr(settings, "APP_ENV", "production"),
-).lower()
-
+APP_ENV = settings.APP_ENV
 IS_PRODUCTION = APP_ENV == "production"
 
 logging.basicConfig(
@@ -50,9 +45,9 @@ logging.basicConfig(
 logger = logging.getLogger("remit")
 
 
-# --------------------------------------------------
-# LIFESPAN MANAGEMENT
-# --------------------------------------------------
+# =========================================================
+# APPLICATION LIFECYCLE
+# =========================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,41 +61,38 @@ async def lifespan(app: FastAPI):
 
         if not database_available:
             raise RuntimeError(
-                "Database connection check failed."
+                "Remit startup failed: PostgreSQL is unavailable."
             )
 
-        logger.info("Database connection established.")
+        logger.info("PostgreSQL connection established.")
+
+        yield
 
     except Exception:
-        logger.exception(
-            "Application startup database check failed."
-        )
-
-        await close_database()
+        logger.exception("Application lifecycle error.")
         raise
 
-    yield
+    finally:
+        logger.info("Shutting down %s API", APP_NAME)
 
-    logger.info("Shutting down %s API", APP_NAME)
+        try:
+            await close_database()
+            logger.info("Database connections closed.")
 
-    try:
-        await close_database()
-        logger.info("Database connections closed.")
-
-    except Exception:
-        logger.exception(
-            "Error while closing database connections."
-        )
+        except Exception:
+            logger.exception(
+                "Failed to close database connections."
+            )
 
 
-# --------------------------------------------------
+# =========================================================
 # FASTAPI APPLICATION
-# --------------------------------------------------
+# =========================================================
 
 app = FastAPI(
     title=APP_NAME,
     description=(
-        "Remit - Secure international money transfer "
+        "Remit - International money transfer "
         "and remittance platform."
     ),
     version=APP_VERSION,
@@ -111,17 +103,25 @@ app = FastAPI(
 )
 
 
-# --------------------------------------------------
+# =========================================================
 # REQUEST ID MIDDLEWARE
-# --------------------------------------------------
+# =========================================================
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
 
-        request_id = request.headers.get(
-            "X-Request-ID"
-        ) or str(uuid.uuid4())
+        supplied_id = request.headers.get("X-Request-ID")
+
+        # Only accept simple, bounded request identifiers.
+        if (
+            supplied_id
+            and len(supplied_id) <= 64
+            and re.fullmatch(r"[A-Za-z0-9._-]+", supplied_id)
+        ):
+            request_id = supplied_id
+        else:
+            request_id = str(uuid.uuid4())
 
         request.state.request_id = request_id
 
@@ -135,9 +135,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestIDMiddleware)
 
 
-# --------------------------------------------------
-# SECURITY HEADERS MIDDLEWARE
-# --------------------------------------------------
+# =========================================================
+# SECURITY HEADERS
+# =========================================================
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
@@ -153,18 +153,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "strict-origin-when-cross-origin"
         )
 
-        response.headers["Cache-Control"] = (
-            "no-store"
-        )
+        response.headers["Cache-Control"] = "no-store"
 
         response.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=()"
         )
 
         if IS_PRODUCTION:
-            response.headers[
-                "Strict-Transport-Security"
-            ] = (
+            response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )
 
@@ -174,30 +170,27 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 
-# --------------------------------------------------
+# =========================================================
 # CORS CONFIGURATION
-# --------------------------------------------------
+# =========================================================
 
-cors_origins = getattr(
-    settings,
-    "CORS_ORIGINS",
-    [],
-)
+cors_origins = settings.cors_origins_list
 
-if isinstance(cors_origins, str):
-    cors_origins = [
-        origin.strip()
-        for origin in cors_origins.split(",")
-        if origin.strip()
-    ]
+if IS_PRODUCTION:
 
-if IS_PRODUCTION and (
-    not cors_origins or "*" in cors_origins
-):
-    raise RuntimeError(
-        "Production requires explicit CORS origins. "
-        "Wildcard CORS is not permitted."
-    )
+    if not cors_origins or "*" in cors_origins:
+        raise RuntimeError(
+            "Production requires explicit CORS origins."
+        )
+
+    if any(
+        "localhost" in origin or "127.0.0.1" in origin
+        for origin in cors_origins
+    ):
+        raise RuntimeError(
+            "Localhost origins are not permitted in production."
+        )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -225,9 +218,9 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
+# =========================================================
 # GLOBAL EXCEPTION HANDLER
-# --------------------------------------------------
+# =========================================================
 
 @app.exception_handler(Exception)
 async def global_exception_handler(
@@ -262,14 +255,11 @@ async def global_exception_handler(
     )
 
 
-# --------------------------------------------------
+# =========================================================
 # ROOT ENDPOINT
-# --------------------------------------------------
+# =========================================================
 
-@app.get(
-    "/",
-    tags=["System"],
-)
+@app.get("/", tags=["System"])
 async def root():
 
     return {
@@ -277,64 +267,34 @@ async def root():
         "application": APP_NAME,
         "version": APP_VERSION,
         "status": "running",
-        "message": "Remit API is operational.",
+        "message": "Remit API is running.",
     }
 
 
-# --------------------------------------------------
-# BASIC HEALTH CHECK
-# --------------------------------------------------
+# =========================================================
+# LIVENESS CHECK
+# =========================================================
 
-@app.get(
-    "/health",
-    tags=["System"],
-)
+@app.get("/health", tags=["System"])
 async def health_check():
 
     return {
         "success": True,
-        "status": "healthy",
+        "status": "alive",
         "application": APP_NAME,
     }
 
 
-# --------------------------------------------------
+# =========================================================
 # DATABASE READINESS CHECK
-# --------------------------------------------------
+# =========================================================
 
-@app.get(
-    "/health/ready",
-    tags=["System"],
-)
+@app.get("/health/ready", tags=["System"])
 async def readiness_check():
 
-    try:
+    database_ok = await check_database_connection()
 
-        database_ok = await check_database_connection()
-
-        if not database_ok:
-
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "success": False,
-                    "status": "not_ready",
-                    "database": "unavailable",
-                },
-            )
-
-        return {
-            "success": True,
-            "status": "ready",
-            "database": "connected",
-        }
-
-    except Exception:
-
-        logger.exception(
-            "Database readiness check failed."
-        )
-
+    if not database_ok:
         return JSONResponse(
             status_code=503,
             content={
@@ -344,16 +304,24 @@ async def readiness_check():
             },
         )
 
+    return {
+        "success": True,
+        "status": "ready",
+        "database": "connected",
+    }
 
-# --------------------------------------------------
+
+# =========================================================
 # SYSTEM STATUS
-# --------------------------------------------------
+# =========================================================
 
 @app.get(
     f"{API_PREFIX}/system/status",
     tags=["System"],
 )
 async def system_status():
+
+    database_ok = await check_database_connection()
 
     uptime = time.time() - getattr(
         app.state,
@@ -362,18 +330,27 @@ async def system_status():
     )
 
     return {
-        "success": True,
+        "success": database_ok,
         "application": APP_NAME,
         "version": APP_VERSION,
         "environment": APP_ENV,
-        "status": "operational",
+        "status": (
+            "operational"
+            if database_ok
+            else "degraded"
+        ),
+        "database": (
+            "connected"
+            if database_ok
+            else "unavailable"
+        ),
         "uptime_seconds": round(uptime, 2),
     }
 
 
-# --------------------------------------------------
+# =========================================================
 # API ROUTERS
-# --------------------------------------------------
+# =========================================================
 
 app.include_router(auth_router)
 
@@ -384,6 +361,6 @@ app.include_router(ledger_router)
 app.include_router(payments_router)
 
 
-# --------------------------------------------------
-# END OF APPLICATION
-# --------------------------------------------------
+# =========================================================
+# END
+# =========================================================
