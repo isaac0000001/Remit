@@ -1,5 +1,4 @@
 import asyncio
-
 from logging.config import fileConfig
 
 from alembic import context
@@ -16,14 +15,45 @@ config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
+
 target_metadata = Base.metadata
 
 
-def database_url():
-    if not settings.DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not configured")
+def database_url() -> str:
+    database = settings.DATABASE_URL
 
-    return settings.DATABASE_URL
+    if not database:
+        raise RuntimeError(
+            "DATABASE_URL is not configured"
+        )
+
+    if hasattr(database, "get_secret_value"):
+        url = database.get_secret_value()
+    else:
+        url = str(database)
+
+    url = url.strip()
+
+    if url.startswith("postgres://"):
+        url = url.replace(
+            "postgres://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    elif url.startswith("postgresql://"):
+        url = url.replace(
+            "postgresql://",
+            "postgresql+asyncpg://",
+            1,
+        )
+
+    if not url.startswith("postgresql+asyncpg://"):
+        raise RuntimeError(
+            "DATABASE_URL must use PostgreSQL with asyncpg"
+        )
+
+    return url
 
 
 def run_migrations_offline():
@@ -51,6 +81,7 @@ def do_run_migrations(connection: Connection):
 
 
 async def run_migrations_online():
+
     configuration = config.get_section(
         config.config_ini_section
     )
@@ -63,10 +94,14 @@ async def run_migrations_online():
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(
+                do_run_migrations
+            )
 
-    await connectable.dispose()
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():
