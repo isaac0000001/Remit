@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
@@ -9,8 +9,15 @@ from app.api.ledger import router as ledger_router
 from app.api.payments import router as payments_router
 
 from app.config import settings
-from app.database import close_database
+from app.database import (
+    close_database,
+    check_database_connection,
+)
 
+
+# ==========================================
+# APPLICATION LIFECYCLE
+# ==========================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -19,6 +26,10 @@ async def lifespan(app: FastAPI):
     finally:
         await close_database()
 
+
+# ==========================================
+# FASTAPI APPLICATION
+# ==========================================
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -29,6 +40,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ==========================================
+# CORS CONFIGURATION
+# ==========================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,30 +65,34 @@ app.add_middleware(
 )
 
 
-# Authentication
+# ==========================================
+# API ROUTERS
+# ==========================================
+
 app.include_router(
     auth_router,
     prefix=settings.API_PREFIX,
 )
 
-# Compliance
 app.include_router(
     compliance_router,
     prefix=settings.API_PREFIX,
 )
 
-# Payments
 app.include_router(
     payments_router,
     prefix=settings.API_PREFIX,
 )
 
-# Ledger
 app.include_router(
     ledger_router,
     prefix=settings.API_PREFIX,
 )
 
+
+# ==========================================
+# ROOT ENDPOINT
+# ==========================================
 
 @app.get("/")
 async def root():
@@ -84,6 +103,10 @@ async def root():
     }
 
 
+# ==========================================
+# APPLICATION HEALTH CHECK
+# ==========================================
+
 @app.get("/health")
 async def health():
     return {
@@ -91,6 +114,31 @@ async def health():
         "service": "remit-api",
     }
 
+
+# ==========================================
+# DATABASE CONNECTION CHECK
+# ==========================================
+
+@app.get("/health/database")
+async def database_health():
+
+    connected = await check_database_connection()
+
+    if not connected:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection failed",
+        )
+
+    return {
+        "status": "healthy",
+        "database": "connected",
+    }
+
+
+# ==========================================
+# SYSTEM STATUS
+# ==========================================
 
 @app.get(f"{settings.API_PREFIX}/system/status")
 async def system_status():
