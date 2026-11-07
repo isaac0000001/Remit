@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+import logging
 
 from fastapi import HTTPException
 from sqlalchemy import text
@@ -8,9 +9,12 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from pydantic import SecretStr
 
 from app.config import settings
 
+
+logger = logging.getLogger(__name__)
 
 engine = None
 AsyncSessionLocal = None
@@ -20,41 +24,65 @@ AsyncSessionLocal = None
 # DATABASE CONFIGURATION
 # ==========================================
 
-if settings.DATABASE_URL:
+database_setting = getattr(settings, "DATABASE_URL", None)
 
-    # Read database URL from secure settings
-    raw_database_url = settings.DATABASE_URL.get_secret_value()
+if database_setting:
 
-    # Parse URL and force the asyncpg driver
-    parsed_url = make_url(raw_database_url)
+    try:
+        # Support SecretStr and ordinary strings
+        if isinstance(database_setting, SecretStr):
+            raw_database_url = database_setting.get_secret_value()
+        else:
+            raw_database_url = str(database_setting)
 
-    if parsed_url.get_backend_name() != "postgresql":
-        raise ValueError(
-            "DATABASE_URL must point to a PostgreSQL database."
+        # Parse database URL
+        parsed_url = make_url(raw_database_url)
+
+        # Validate PostgreSQL
+        if parsed_url.get_backend_name() != "postgresql":
+            raise ValueError(
+                "DATABASE_URL must point to PostgreSQL."
+            )
+
+        # Force asynchronous PostgreSQL driver
+        database_url = parsed_url.set(
+            drivername="postgresql+asyncpg"
         )
 
-    database_url = parsed_url.set(
-        drivername="postgresql+asyncpg"
-    )
+        # Create asynchronous engine
+        engine = create_async_engine(
+            database_url,
+            echo=False,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,
+            connect_args={
+                "server_settings": {
+                    "application_name": "Remit"
+                }
+            },
+        )
 
-    # Create asynchronous database engine
-    engine = create_async_engine(
-        database_url,
-        echo=False,
-        pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=30,
-        pool_recycle=1800,
-    )
+        # Create session factory
+        AsyncSessionLocal = async_sessionmaker(
+            bind=engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autoflush=False,
+            autocommit=False,
+        )
 
-    # Create asynchronous session factory
-    AsyncSessionLocal = async_sessionmaker(
-        bind=engine,
-        class_=AsyncSession,
-        expire_on_commit=False,
-        autoflush=False,
-        autocommit=False,
+        logger.info("Database engine configured successfully.")
+
+    except Exception:
+        logger.exception("Database configuration failed.")
+        raise
+
+else:
+    logger.warning(
+        "DATABASE_URL is not configured. Database operations are disabled."
     )
 
 
@@ -67,7 +95,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     if AsyncSessionLocal is None:
         raise HTTPException(
             status_code=503,
-            detail="Database service is not configured",
+            detail="Database service is not configured.",
         )
 
     async with AsyncSessionLocal() as session:
@@ -84,10 +112,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 # CLOSE DATABASE CONNECTION
 # ==========================================
 
-async def close_database():
+async def close_database() -> None:
+
+    global engine
 
     if engine is not None:
         await engine.dispose()
+        logger.info("Database connections closed.")
 
 
 # ==========================================
@@ -101,9 +132,13 @@ async def check_database_connection() -> bool:
 
     try:
         async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+
+            await connection.execute(
+                text("SELECT 1")
+            )
 
         return True
 
     except Exception:
+        logger.exception("Database health check failed.")
         return False
