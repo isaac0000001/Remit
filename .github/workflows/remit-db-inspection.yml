@@ -1,0 +1,109 @@
+name: Remit Database Inspection
+
+on:
+workflow_dispatch:
+
+permissions:
+contents: read
+
+jobs:
+inspect-database:
+runs-on: ubuntu-latest
+timeout-minutes: 5
+
+steps:
+  - name: Set up Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+
+  - name: Install PostgreSQL driver
+    run: pip install "psycopg[binary]>=3.2,<4"
+
+  - name: Inspect database safely
+    env:
+      REMIT_DATABASE_URL: ${{ secrets.REMIT_DATABASE_URL }}
+    run: |
+      python - <<'PY'
+      import os
+      import sys
+      import psycopg
+      from psycopg import sql
+
+      url = os.environ.get("REMIT_DATABASE_URL")
+
+      if not url:
+          print("ERROR: Database secret is missing.")
+          sys.exit(1)
+
+      try:
+          with psycopg.connect(
+              url,
+              connect_timeout=20,
+              sslmode="require"
+          ) as conn:
+
+              with conn.cursor() as cur:
+                  cur.execute("SET TRANSACTION READ ONLY")
+
+                  cur.execute("""
+                      SELECT current_database(),
+                             current_user,
+                             current_schema()
+                  """)
+                  database, user, schema = cur.fetchone()
+
+                  print("DATABASE CONNECTION: SUCCESS")
+                  print("Database:", database)
+                  print("Schema:", schema)
+                  print("Database user:", user)
+
+                  cur.execute("""
+                      SELECT table_name
+                      FROM information_schema.tables
+                      WHERE table_schema = 'public'
+                        AND table_type = 'BASE TABLE'
+                      ORDER BY table_name
+                  """)
+
+                  tables = [row[0] for row in cur.fetchall()]
+
+                  print("\nEXISTING TABLES:")
+
+                  if not tables:
+                      print("No public tables found.")
+
+                  for table in tables:
+                      cur.execute(
+                          sql.SQL("SELECT COUNT(*) FROM {}").format(
+                              sql.Identifier("public", table)
+                          )
+                      )
+                      count = cur.fetchone()[0]
+                      print(f"{table}: {count} records")
+
+                  print("\nALEMBIC MIGRATION HISTORY:")
+
+                  if "alembic_version" in tables:
+                      cur.execute(
+                          "SELECT version_num FROM alembic_version"
+                      )
+                      revisions = cur.fetchall()
+
+                      if revisions:
+                          for revision in revisions:
+                              print("Revision:", revision[0])
+                      else:
+                          print("Migration table exists but is empty.")
+                  else:
+                      print("No alembic_version table found.")
+
+                  print("\nINSPECTION COMPLETED.")
+                  print("No database records were modified.")
+
+      except Exception as exc:
+          print("DATABASE INSPECTION FAILED.")
+          print("Error type:", type(exc).__name__)
+          print("Check database connectivity and GitHub secret.")
+          sys.exit(1)
+      PY
