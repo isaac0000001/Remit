@@ -1,10 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import logging
+from typing import Annotated, Optional
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+)
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+)
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import get_db
 from app.models import Customer, CustomerStatus
 from app.schemas import (
@@ -21,10 +33,56 @@ from app.security import (
 )
 
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+logger = logging.getLogger(__name__)
 
-bearer_scheme = HTTPBearer()
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"],
+)
 
+settings = get_settings()
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+# =========================================================
+# DEPENDENCIES
+# =========================================================
+
+DatabaseSession = Annotated[
+    AsyncSession,
+    Depends(get_db),
+]
+
+BearerCredentials = Annotated[
+    Optional[HTTPAuthorizationCredentials],
+    Depends(bearer_scheme),
+]
+
+
+# =========================================================
+# ACCOUNT STATUS
+# =========================================================
+
+def ensure_account_is_active(customer: Customer) -> None:
+    """
+    Prevent suspended and closed accounts from accessing
+    protected authentication endpoints.
+    """
+
+    if customer.status in (
+        CustomerStatus.SUSPENDED,
+        CustomerStatus.CLOSED,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is unavailable.",
+        )
+
+
+# =========================================================
+# CUSTOMER REGISTRATION
+# =========================================================
 
 @router.post(
     "/register",
@@ -33,18 +91,20 @@ bearer_scheme = HTTPBearer()
 )
 async def register_customer(
     data: CustomerRegister,
-    db: AsyncSession = Depends(get_db),
+    db: DatabaseSession,
 ):
     email = str(data.email).strip().lower()
 
     existing = await db.execute(
-        select(Customer).where(Customer.email == email)
+        select(Customer).where(
+            Customer.email == email
+        )
     )
 
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Unable to register with these details",
+            detail="Unable to register with these details.",
         )
 
     customer = Customer(
@@ -53,7 +113,7 @@ async def register_customer(
         email=email,
         password_hash=hash_password(data.password),
         phone_number=data.phone_number,
-        country=data.country.upper(),
+        country=data.country.strip().upper(),
         status=CustomerStatus.PENDING,
         email_verified=False,
     )
@@ -63,95 +123,170 @@ async def register_customer(
     try:
         await db.commit()
         await db.refresh(customer)
+
     except IntegrityError as exc:
         await db.rollback()
+
+        logger.warning(
+            "Customer registration rejected because of a database constraint."
+        )
+
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Unable to register with these details",
+            detail="Unable to register with these details.",
         ) from exc
+
+    except Exception:
+        await db.rollback()
+        logger.exception("Customer registration failed.")
+        raise
 
     return customer
 
 
-@router.post("/login", response_model=TokenResponse)
+# =========================================================
+# CUSTOMER LOGIN
+# =========================================================
+
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+)
 async def login_customer(
     data: CustomerLogin,
-    db: AsyncSession = Depends(get_db),
+    db: DatabaseSession,
 ):
     email = str(data.email).strip().lower()
 
     result = await db.execute(
-        select(Customer).where(Customer.email == email)
+        select(Customer).where(
+            Customer.email == email
+        )
     )
 
     customer = result.scalar_one_or_none()
 
-    if not customer or not verify_password(
+    # Use the same response for incorrect email/password.
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
+        )
+
+    if not verify_password(
         data.password,
         customer.password_hash,
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
+            detail="Invalid email or password.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
         )
 
-    if customer.status in (
-        CustomerStatus.SUSPENDED,
-        CustomerStatus.CLOSED,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is unavailable",
-        )
+    ensure_account_is_active(customer)
 
-    token = create_access_token(str(customer.id))
+    token = create_access_token(
+        str(customer.id)
+    )
 
     return TokenResponse(
         access_token=token,
-        expires_in=1800,
+        token_type="bearer",
+        expires_in=(
+            settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        ),
     )
 
 
+# =========================================================
+# CURRENT CUSTOMER AUTHENTICATION
+# =========================================================
+
 async def get_current_customer(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
+    credentials: BearerCredentials,
+    db: DatabaseSession,
 ) -> Customer:
-    try:
-        payload = decode_access_token(credentials.credentials)
-        customer_id = payload["sub"]
-    except (InvalidTokenError, KeyError, TypeError) as exc:
+
+    if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired access token",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Authentication required.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
+        )
+
+    try:
+        payload = decode_access_token(
+            credentials.credentials
+        )
+
+        customer_id = payload.get("sub")
+
+        if not isinstance(customer_id, str) or not customer_id:
+            raise InvalidTokenError(
+                "Invalid token subject."
+            )
+
+    except (
+        InvalidTokenError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired access token.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
         ) from exc
 
     result = await db.execute(
-        select(Customer).where(Customer.id == customer_id)
+        select(Customer).where(
+            Customer.id == customer_id
+        )
     )
 
     customer = result.scalar_one_or_none()
 
-    if not customer:
+    if customer is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Customer account not found",
+            detail="Invalid or expired access token.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
         )
 
-    if customer.status in (
-        CustomerStatus.SUSPENDED,
-        CustomerStatus.CLOSED,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is unavailable",
-        )
+    ensure_account_is_active(customer)
 
     return customer
 
 
-@router.get("/me", response_model=CustomerResponse)
+# =========================================================
+# CUSTOMER PROFILE
+# =========================================================
+
+@router.get(
+    "/me",
+    response_model=CustomerResponse,
+)
 async def get_my_profile(
-    customer: Customer = Depends(get_current_customer),
+    customer: Annotated[
+        Customer,
+        Depends(get_current_customer),
+    ],
 ):
     return customer
+
+
+# =========================================================
+# END
+# =========================================================
